@@ -1,0 +1,141 @@
+From 6d9a951e0e600cce0ad22eb2f9e0b997a41d7216 Mon Sep 17 00:00:00 2001
+From: David Cooper <david@dtcooper.com>
+Date: Sat, 26 Oct 2024 12:29:28 -0400
+Subject: [PATCH] Play call alerts configuration setting
+
+---
+ blink/configuration/settings.py |  1 +
+ blink/preferences.py            |  7 +++++++
+ blink/sessions.py               | 18 +++++++++++-------
+ resources/preferences.ui        |  9 ++++++++-
+ 4 files changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/blink/configuration/settings.py b/blink/configuration/settings.py
+index a52f819..fc7b885 100644
+--- a/blink/configuration/settings.py
++++ b/blink/configuration/settings.py
+@@ -31,6 +31,7 @@ class AudioSettingsExtension(AudioSettings):
+     recordings_directory = Setting(type=ApplicationDataPath, default=ApplicationDataPath('recordings'))
+     sample_rate = Setting(type=SampleRate, default=41000 if sys.platform != 'darwin' else 32000)
+     echo_canceller = EchoCancellerSettingsExtension
++    play_call_alerts = Setting(type=bool, default=False)
+ 
+ 
+ class SIPSettingsExtension(SIPSettings):
+diff --git a/blink/preferences.py b/blink/preferences.py
+index 2ba86a4..c44b99f 100644
+--- a/blink/preferences.py
++++ b/blink/preferences.py
+@@ -304,6 +304,7 @@ class PreferencesWindow(base_class, ui_class, metaclass=QSingleton):
+         self.audio_output_device_button.activated[int].connect(self._SH_AudioOutputDeviceButtonActivated)
+         self.audio_sample_rate_button.activated[int].connect(self._SH_AudioSampleRateButtonActivated)
+         self.enable_echo_cancelling_button.clicked.connect(self._SH_EnableEchoCancellingButtonClicked)
++        self.enable_play_call_alerts_button.clicked.connect(self._SH_EnablePlayCallAlertsButtonClicked)
+         self.tail_length_slider.valueChanged.connect(self._SH_TailLengthSliderValueChanged)
+ 
+         # Audio codecs
+@@ -710,6 +711,7 @@ class PreferencesWindow(base_class, ui_class, metaclass=QSingleton):
+         # Audio devices
+         self.load_audio_devices()
+         self.enable_echo_cancelling_button.setChecked(settings.audio.echo_canceller.enabled)
++        self.enable_play_call_alerts_button.setChecked(settings.audio.play_call_alerts)
+         with blocked_qt_signals(self.tail_length_slider):
+             self.tail_length_slider.setValue(settings.audio.echo_canceller.tail_length)
+         self.audio_sample_rate_button.clear()
+@@ -1611,6 +1613,11 @@ class PreferencesWindow(base_class, ui_class, metaclass=QSingleton):
+         settings.audio.echo_canceller.tail_length = value
+         settings.save()
+ 
++    def _SH_EnablePlayCallAlertsButtonClicked(self, checked):
++        settings = SIPSimpleSettings()
++        settings.audio.play_call_alerts = checked
++        settings.save()
++
+     # Audio codecs signal handlers
+     def _SH_AudioCodecsListItemChanged(self, item):
+         settings = SIPSimpleSettings()
+diff --git a/blink/sessions.py b/blink/sessions.py
+index 616207c..cfc22c1 100644
+--- a/blink/sessions.py
++++ b/blink/sessions.py
+@@ -6648,8 +6648,8 @@ class SessionManager(object, metaclass=Singleton):
+         # Outgoing ringtone
+         outgoing_sessions_or_proposals = [session for session in self.sessions if session.state == 'connecting/ringing' and session.direction == 'outgoing' or session.state == 'connected/sent_proposal']
+         outgoing_file_transfers = [transfer for transfer in self.file_transfers if transfer.state == 'connecting/ringing' and transfer.direction == 'outgoing']
+-        if any(not session.on_hold for session in outgoing_sessions_or_proposals) or outgoing_file_transfers:
+-            settings = SIPSimpleSettings()
++        settings = SIPSimpleSettings()
++        if settings.audio.play_call_alerts and any(not session.on_hold for session in outgoing_sessions_or_proposals) or outgoing_file_transfers:
+             outbound_ringtone = settings.sounds.outbound_ringtone
+             if outbound_ringtone:
+                 if any('audio' in session.streams.proposed and not session.on_hold for session in outgoing_sessions_or_proposals):
+@@ -6702,7 +6702,7 @@ class SessionManager(object, metaclass=Singleton):
+         # Hold tone
+         connected_sessions = [session for session in self.sessions if session.state == 'connected/*']
+         connected_on_hold_sessions = [session for session in connected_sessions if session.on_hold]
+-        if outbound_ringtone is Null and inbound_ringtone is Null and connected_sessions:
++        if settings.audio.play_call_alerts and outbound_ringtone is Null and inbound_ringtone is Null and connected_sessions:
+             if len(connected_sessions) == len(connected_on_hold_sessions):
+                 hold_tone = WavePlayer(SIPApplication.alert_audio_mixer, Resources.get('sounds/hold_tone.wav'), loop_count=0, volume=30, initial_delay=45, pause_time=45)
+                 hold_tone.bridge = SIPApplication.alert_audio_bridge
+@@ -6902,21 +6902,24 @@ class SessionManager(object, metaclass=Singleton):
+             notification.sender._play_hangup_tone = notification.data.old_state in ('connecting/*', 'connected/*') and notification.sender.streams.types.intersection({'audio', 'video'})
+ 
+     def _NH_BlinkSessionDidChangeHoldState(self, notification):
+-        if notification.sender is self.active_session and notification.data.originator == 'remote' and notification.data.remote_hold and not notification.data.local_hold:
++        settings = SIPSimpleSettings()
++        if settings.sounds.play_message_alerts and notification.sender is self.active_session and notification.data.originator == 'remote' and notification.data.remote_hold and not notification.data.local_hold:
+             player = WavePlayer(SIPApplication.voice_audio_bridge.mixer, Resources.get('sounds/hold_tone.wav'), loop_count=1, volume=30)
+             SIPApplication.voice_audio_bridge.add(player)
+             player.start()
+         self.update_ringtone()
+ 
+     def _NH_BlinkSessionDidRemoveStream(self, notification):
+-        if notification.data.stream.type in ('audio', 'video') and not self._hangup_tone_timer.isActive():
++        settings = SIPSimpleSettings()
++        if settings.audio.play_call_alerts and notification.data.stream.type in ('audio', 'video') and not self._hangup_tone_timer.isActive():
+             self._hangup_tone_timer.start()
+             player = WavePlayer(SIPApplication.voice_audio_bridge.mixer, Resources.get('sounds/hangup_tone.wav'), volume=30)
+             SIPApplication.voice_audio_bridge.add(player)
+             player.start()
+ 
+     def _NH_BlinkSessionDidEnd(self, notification):
+-        if notification.sender._play_hangup_tone and not self._hangup_tone_timer.isActive():
++        settings = SIPSimpleSettings()
++        if settings.audio.play_call_alerts and notification.sender._play_hangup_tone and not self._hangup_tone_timer.isActive():
+             self._hangup_tone_timer.start()
+             player = WavePlayer(SIPApplication.voice_audio_bridge.mixer, Resources.get('sounds/hangup_tone.wav'), volume=30)
+             SIPApplication.voice_audio_bridge.add(player)
+@@ -6963,7 +6966,8 @@ class SessionManager(object, metaclass=Singleton):
+     def _NH_BlinkFileTransferDidEnd(self, notification):
+         self.file_transfers.remove(notification.sender)
+         notification.center.remove_observer(self, sender=notification.sender)
+-        if not notification.data.error and not self._filetransfer_tone_timer.isActive():
++        settings = SIPSimpleSettings()
++        if settings.play_call_alerts and not notification.data.error and not self._filetransfer_tone_timer.isActive():
+             self._filetransfer_tone_timer.start()
+             player = WavePlayer(SIPApplication.voice_audio_bridge.mixer, Resources.get('sounds/file_transfer.wav'), volume=30)
+             SIPApplication.voice_audio_bridge.add(player)
+diff --git a/resources/preferences.ui b/resources/preferences.ui
+index 58454dd..c4469d0 100644
+--- a/resources/preferences.ui
++++ b/resources/preferences.ui
+@@ -2041,7 +2041,14 @@
+              </property>
+             </widget>
+            </item>
+-           <item row="5" column="0">
++           <item row="5" column="1" colspan="2">
++            <widget class="QCheckBox" name="enable_play_call_alerts_button">
++             <property name="text">
++              <string>Play call alerts</string>
++             </property>
++            </widget>
++           </item>
++           <item row="6" column="0">
+             <widget class="QLabel" name="tail_length_label">
+              <property name="text">
+               <string>Tail Length:</string>
+-- 
+2.47.0
+
